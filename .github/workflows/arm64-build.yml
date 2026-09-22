@@ -12,15 +12,18 @@ on:
 permissions:
   contents: write
 
+env:
+  QT_STATIC_PREFIX: ${{ github.workspace }}/.qt-static/5.15.17
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+
 jobs:
-  build-arm64:
-    name: Test and build upstream tag for Ubuntu ARM64
+  prepare:
+    name: Prepare static Qt
     runs-on: ubuntu-26.04-arm
-    env:
-      QT_SELECT: qt5
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      QT_STATIC_PREFIX: ${{ github.workspace }}/.qt-static/5.15.17
+    outputs:
+      upstream_tag: ${{ steps.version.outputs.upstream_tag }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
 
     steps:
       - name: Checkout ARM64 automation
@@ -64,89 +67,18 @@ jobs:
           echo "Upstream tag: $tag"
           echo "ARM64 release tag: $release_tag"
 
-      - name: Checkout upstream RenderDoc
-        uses: actions/checkout@v6
-        with:
-          repository: baldurk/renderdoc
-          ref: ${{ steps.version.outputs.upstream_tag }}
-          path: source
-          fetch-depth: 1
+      - name: Install static Qt build dependencies
+        run: bash automation/packaging/arm64/install_build_deps.sh
 
-      - name: Patch personal ARM64 branding
-        run: python3 automation/packaging/arm64/patch_source.py source
-
-      - name: Show source revision
-        id: source
+      - name: Build static Qt from scratch
         run: |
           set -euo pipefail
-          sha="$(git -C source rev-parse HEAD)"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "Building upstream ${{ steps.version.outputs.upstream_tag }} at $sha"
-
-      - name: Show environment
-        run: |
-          uname -a
-          dpkg --print-architecture
-          gcc --version
-          cmake --version
-
-      - name: Install build and test dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            gcc-14 \
-            g++-14 \
-            cmake \
-            pkg-config \
-            curl \
-            xz-utils \
-            libx11-dev \
-            libx11-xcb-dev \
-            libxext-dev \
-            libxi-dev \
-            libxrender-dev \
-            libxcb1-dev \
-            libxcb-util-dev \
-            libxcb-keysyms1-dev \
-            libxcb-image0-dev \
-            libxcb-shm0-dev \
-            libxcb-icccm4-dev \
-            libxcb-sync-dev \
-            libxcb-xfixes0-dev \
-            libxcb-shape0-dev \
-            libxcb-randr0-dev \
-            libxcb-render0-dev \
-            libxcb-render-util0-dev \
-            libxcb-xinerama0-dev \
-            libxcb-xinput-dev \
-            libxcb-xkb-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libfontconfig1-dev \
-            libfreetype-dev \
-            libssl-dev \
-            mesa-common-dev \
-            libgl1-mesa-dev \
-            python3.14-dev \
-            bison \
-            autoconf \
-            automake \
-            libtool
-
-      - name: Check build toolchain
-        run: |
-          gcc-14 --version
-          g++-14 --version
-          python3.14 --version
-
-      - name: Build static Qt
-        run: |
           rm -rf "$QT_STATIC_PREFIX"
-          automation/packaging/arm64/build_static_qt.sh "$QT_STATIC_PREFIX"
+          bash automation/packaging/arm64/build_static_qt.sh "$QT_STATIC_PREFIX"
 
       - name: Verify static Qt
         run: |
+          set -euo pipefail
           "$QT_STATIC_PREFIX/bin/qmake" -v
           test -f "$QT_STATIC_PREFIX/lib/libQt5Core.a"
           test -f "$QT_STATIC_PREFIX/lib/libQt5Gui.a"
@@ -155,9 +87,61 @@ jobs:
           test -f "$QT_STATIC_PREFIX/lib/libQt5Svg.a"
           test -f "$QT_STATIC_PREFIX/lib/libQt5X11Extras.a"
 
-      - name: Configure static Debug build for unit tests
+      - name: Package static Qt for this workflow run
         run: |
-          CC=gcc-14 CXX=g++-14 cmake -S source -B build-test \
+          set -euo pipefail
+          tar -C "$QT_STATIC_PREFIX" -czf static-qt-5.15.17-arm64.tar.gz .
+
+      - name: Upload static Qt workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: static-qt-5.15.17-arm64
+          path: static-qt-5.15.17-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  debug-test:
+    name: Static Debug unit tests
+    needs: prepare
+    runs-on: ubuntu-26.04-arm
+
+    steps:
+      - name: Checkout ARM64 automation
+        uses: actions/checkout@v6
+        with:
+          path: automation
+
+      - name: Checkout upstream RenderDoc
+        uses: actions/checkout@v6
+        with:
+          repository: baldurk/renderdoc
+          ref: ${{ needs.prepare.outputs.upstream_tag }}
+          path: source
+          fetch-depth: 1
+
+      - name: Patch personal ARM64 branding
+        run: python3 automation/packaging/arm64/patch_source.py source
+
+      - name: Install Debug build dependencies
+        run: bash automation/packaging/arm64/install_build_deps.sh
+
+      - name: Download static Qt from prepare job
+        uses: actions/download-artifact@v8
+        with:
+          name: static-qt-5.15.17-arm64
+          path: qt-artifact
+
+      - name: Restore static Qt for this job
+        run: |
+          set -euo pipefail
+          rm -rf "$QT_STATIC_PREFIX"
+          mkdir -p "$QT_STATIC_PREFIX"
+          tar -C "$QT_STATIC_PREFIX" -xzf qt-artifact/static-qt-5.15.17-arm64.tar.gz
+          "$QT_STATIC_PREFIX/bin/qmake" -v
+
+      - name: Configure static Debug build
+        run: |
+          CC=gcc-14 CXX=g++-14 cmake -S source -B build-debug \
             -DCMAKE_BUILD_TYPE=Debug \
             -DSTATIC_QRENDERDOC=ON \
             -DQRENDERDOC_NO_CXX11_REGEX=ON \
@@ -167,9 +151,8 @@ jobs:
             -DPython3_USE_STATIC_LIBS=TRUE \
             -DFORCE_PY_VERSION=3.14
 
-      - name: Build static Debug binaries
-        run: |
-          cmake --build build-test --parallel "$(nproc)"
+      - name: Build static Debug
+        run: cmake --build build-debug --parallel "$(nproc)"
 
       - name: Prepare Python standard library for Debug tests
         run: |
@@ -178,7 +161,7 @@ jobs:
           pyver="$(python3.14 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
           stdlib="$(python3.14 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')"
           destshared="$(python3.14 -c 'import sysconfig; print(sysconfig.get_config_var("DESTSHARED") or "")')"
-          pylib_root="build-test/share/renderdoc/pylibs/lib/python${pyver}"
+          pylib_root="build-debug/share/renderdoc/pylibs/lib/python${pyver}"
 
           mkdir -p "$pylib_root"
           cp -a "$stdlib/." "$pylib_root/"
@@ -195,11 +178,11 @@ jobs:
             "$pylib_root/ensurepip" \
             "$pylib_root/site-packages"
 
-      - name: Verify Debug build uses static Qt and Python
+      - name: Verify Debug runtime links
         run: |
           set -euo pipefail
 
-          ldd build-test/bin/qrenderdoc | tee qrenderdoc-debug-ldd.txt
+          ldd build-debug/bin/qrenderdoc | tee qrenderdoc-debug-ldd.txt
 
           if grep -E 'libQt5|libQt6' qrenderdoc-debug-ldd.txt; then
             echo "ERROR: Debug qrenderdoc still dynamically links Qt." >&2
@@ -214,16 +197,75 @@ jobs:
       - name: Run core unit tests
         run: |
           set -euo pipefail
-          build-test/bin/renderdoccmd test unit -o core-unit-tests.log
+          build-debug/bin/renderdoccmd test unit -o core-unit-tests.log
           cat core-unit-tests.log
 
       - name: Run QRenderDoc unit tests
         run: |
           set -euo pipefail
-          build-test/bin/qrenderdoc --unittest log=qrenderdoc-unit-tests.log
+          build-debug/bin/qrenderdoc --unittest log=qrenderdoc-unit-tests.log
           cat qrenderdoc-unit-tests.log
 
-      - name: Configure static release build
+      - name: Upload Debug validation logs
+        uses: actions/upload-artifact@v7
+        with:
+          name: debug-validation-${{ needs.prepare.outputs.release_tag }}
+          path: |
+            qrenderdoc-debug-ldd.txt
+            core-unit-tests.log
+            qrenderdoc-unit-tests.log
+          if-no-files-found: error
+
+  release-build:
+    name: Static Release build
+    needs: prepare
+    runs-on: ubuntu-26.04-arm
+    outputs:
+      upstream_sha: ${{ steps.source.outputs.sha }}
+
+    steps:
+      - name: Checkout ARM64 automation
+        uses: actions/checkout@v6
+        with:
+          path: automation
+
+      - name: Checkout upstream RenderDoc
+        uses: actions/checkout@v6
+        with:
+          repository: baldurk/renderdoc
+          ref: ${{ needs.prepare.outputs.upstream_tag }}
+          path: source
+          fetch-depth: 1
+
+      - name: Patch personal ARM64 branding
+        run: python3 automation/packaging/arm64/patch_source.py source
+
+      - name: Record upstream source revision
+        id: source
+        run: |
+          set -euo pipefail
+          sha="$(git -C source rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Building upstream ${{ needs.prepare.outputs.upstream_tag }} at $sha"
+
+      - name: Install Release build dependencies
+        run: bash automation/packaging/arm64/install_build_deps.sh
+
+      - name: Download static Qt from prepare job
+        uses: actions/download-artifact@v8
+        with:
+          name: static-qt-5.15.17-arm64
+          path: qt-artifact
+
+      - name: Restore static Qt for this job
+        run: |
+          set -euo pipefail
+          rm -rf "$QT_STATIC_PREFIX"
+          mkdir -p "$QT_STATIC_PREFIX"
+          tar -C "$QT_STATIC_PREFIX" -xzf qt-artifact/static-qt-5.15.17-arm64.tar.gz
+          "$QT_STATIC_PREFIX/bin/qmake" -v
+
+      - name: Configure static Release build
         run: |
           CC=gcc-14 CXX=g++-14 cmake -S source -B build-release \
             -DCMAKE_BUILD_TYPE=Release \
@@ -237,10 +279,10 @@ jobs:
             -DPython3_USE_STATIC_LIBS=TRUE \
             -DFORCE_PY_VERSION=3.14
 
-      - name: Build static release
+      - name: Build static Release
         run: cmake --build build-release --parallel "$(nproc)"
 
-      - name: Install static release
+      - name: Install static Release
         run: cmake --install build-release
 
       - name: Bundle Python standard library
@@ -272,7 +314,7 @@ jobs:
           mkdir -p dist/share/renderdoc
           cp source/qrenderdoc/Resources/logo.svg dist/share/renderdoc/renderdoc-logo.svg
 
-      - name: Verify release binaries and runtime links
+      - name: Verify Release binaries and runtime links
         run: |
           set -euo pipefail
 
@@ -281,26 +323,26 @@ jobs:
           file build-release/lib/librenderdoc.so
           build-release/bin/renderdoccmd --version
 
-          ldd build-release/bin/qrenderdoc | tee qrenderdoc-ldd.txt
-          ldd build-release/bin/renderdoccmd | tee renderdoccmd-ldd.txt
-          ldd build-release/lib/librenderdoc.so | tee librenderdoc-ldd.txt
+          ldd build-release/bin/qrenderdoc | tee qrenderdoc-release-ldd.txt
+          ldd build-release/bin/renderdoccmd | tee renderdoccmd-release-ldd.txt
+          ldd build-release/lib/librenderdoc.so | tee librenderdoc-release-ldd.txt
 
-          if grep -E 'libQt5|libQt6' qrenderdoc-ldd.txt; then
-            echo "ERROR: qrenderdoc still dynamically links Qt." >&2
+          if grep -E 'libQt5|libQt6' qrenderdoc-release-ldd.txt; then
+            echo "ERROR: Release qrenderdoc still dynamically links Qt." >&2
             exit 1
           fi
 
-          if grep -E 'libpython[0-9]' qrenderdoc-ldd.txt; then
-            echo "ERROR: qrenderdoc still dynamically links Python." >&2
+          if grep -E 'libpython[0-9]' qrenderdoc-release-ldd.txt; then
+            echo "ERROR: Release qrenderdoc still dynamically links Python." >&2
             exit 1
           fi
 
-      - name: Archive build
+      - name: Archive tested Release candidate
         run: tar -C dist -czf renderdoc-linux-arm64.tar.gz .
 
       - name: Prepare standalone installer scripts
         env:
-          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
         run: |
           cp automation/packaging/arm64/install.sh install.sh
           cp automation/packaging/arm64/uninstall.sh uninstall.sh
@@ -312,25 +354,47 @@ jobs:
             exit 1
           fi
 
-      - name: Upload build artifact
+      - name: Upload Release candidate
         uses: actions/upload-artifact@v7
         with:
-          name: renderdoc-${{ steps.version.outputs.release_tag }}
+          name: release-candidate-${{ needs.prepare.outputs.release_tag }}
           path: |
             renderdoc-linux-arm64.tar.gz
-            qrenderdoc-ldd.txt
-            qrenderdoc-debug-ldd.txt
-            renderdoccmd-ldd.txt
-            librenderdoc-ldd.txt
-            core-unit-tests.log
-            qrenderdoc-unit-tests.log
+            install.sh
+            uninstall.sh
+            qrenderdoc-release-ldd.txt
+            renderdoccmd-release-ldd.txt
+            librenderdoc-release-ldd.txt
           if-no-files-found: error
+
+  publish:
+    name: Publish ARM64 Release
+    needs:
+      - prepare
+      - debug-test
+      - release-build
+    runs-on: ubuntu-26.04-arm
+
+    steps:
+      - name: Download successful Release candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: release-candidate-${{ needs.prepare.outputs.release_tag }}
+          path: release-candidate
+
+      - name: Verify publish inputs
+        run: |
+          set -euo pipefail
+          test -f release-candidate/renderdoc-linux-arm64.tar.gz
+          test -f release-candidate/install.sh
+          test -f release-candidate/uninstall.sh
 
       - name: Create or update versioned release
         env:
-          UPSTREAM_TAG: ${{ steps.version.outputs.upstream_tag }}
-          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
-          UPSTREAM_SHA: ${{ steps.source.outputs.sha }}
+          UPSTREAM_TAG: ${{ needs.prepare.outputs.upstream_tag }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          UPSTREAM_SHA: ${{ needs.release-build.outputs.upstream_sha }}
+        working-directory: release-candidate
         run: |
           set -euo pipefail
 
@@ -389,8 +453,8 @@ jobs:
               "- Build OS: Ubuntu 26.04 ARM64",
               "- Qt: statically linked (Qt 5.15.17)",
               "- Python runtime: statically linked; standard library bundled",
-              "- Validation: core and QRenderDoc unit tests run on a static Debug build before the static Release build",
-              f"- Installation: download and run {bt}install.sh{bt} as a normal user; it installs required Ubuntu runtime packages with apt when missing.",
+              "- Validation: static Debug core/QRenderDoc unit tests and static Release runtime-link validation both passed",
+              f"- Installation: download and run {bt}install.sh{bt}; user files are installed under {bt}~/.local{bt} and missing system runtime packages are installed with apt.",
               "",
               marker,
               *history,
@@ -430,7 +494,7 @@ jobs:
             echo "- Upstream: $UPSTREAM_TAG"
             echo "- Release: $RELEASE_TAG"
             echo "- Upstream commit: $UPSTREAM_SHA"
-            echo "- Qt: static 5.15.17"
-            echo "- Unit tests: passed before packaging"
+            echo "- Debug validation: passed"
+            echo "- Release validation: passed"
             echo "- Release URL: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
           } >> "$GITHUB_STEP_SUMMARY"
