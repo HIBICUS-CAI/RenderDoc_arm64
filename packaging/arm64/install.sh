@@ -58,6 +58,18 @@ runtime_packages=(
   libgl1
   libvulkan1
   libssl3t64
+  zlib1g
+  libbz2-1.0
+  libffi8
+  liblzma5
+  libsqlite3-0
+  libreadline8t64
+  libncursesw6
+  libtinfo6
+  libgdbm6t64
+  libgdbm-compat4t64
+  libuuid1
+  libzstd1
   desktop-file-utils
   shared-mime-info
   gtk-update-icon-cache
@@ -189,3 +201,4 @@ echo "Application: ${APP_ROOT}/bin/qrenderdoc"
 echo "Launcher:    GNOME application menu -> RenderDoc ARM64"
 echo "Manifest:    ${MANIFEST}"
 echo "System runtime packages are managed by apt and are not removed by uninstall.sh."
+

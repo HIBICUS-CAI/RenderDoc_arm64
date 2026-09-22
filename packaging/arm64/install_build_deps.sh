@@ -37,7 +37,17 @@ sudo apt-get install -y --no-install-recommends \
   libssl-dev \
   mesa-common-dev \
   libgl1-mesa-dev \
-  python3.14-dev \
+  zlib1g-dev \
+  libbz2-dev \
+  libffi-dev \
+  liblzma-dev \
+  libsqlite3-dev \
+  libreadline-dev \
+  libncurses-dev \
+  libgdbm-dev \
+  libgdbm-compat-dev \
+  uuid-dev \
+  libzstd-dev \
   bison \
   autoconf \
   automake \

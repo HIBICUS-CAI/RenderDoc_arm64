@@ -14,12 +14,13 @@ permissions:
 
 env:
   QT_STATIC_PREFIX: ${{ github.workspace }}/.qt-static/5.15.17
+  PYTHON_STATIC_PREFIX: ${{ github.workspace }}/.python-static/3.14.7
   GH_TOKEN: ${{ github.token }}
   GH_REPO: ${{ github.repository }}
 
 jobs:
   prepare:
-    name: Prepare static Qt
+    name: Prepare static Qt and Python
     runs-on: ubuntu-26.04-arm
     outputs:
       upstream_tag: ${{ steps.version.outputs.upstream_tag }}
@@ -67,8 +68,11 @@ jobs:
           echo "Upstream tag: $tag"
           echo "ARM64 release tag: $release_tag"
 
-      - name: Install static Qt build dependencies
+      - name: Install static build dependencies
         run: bash automation/packaging/arm64/install_build_deps.sh
+
+      - name: Build static Python from scratch
+        run: bash automation/packaging/arm64/build_static_python.sh "$PYTHON_STATIC_PREFIX"
 
       - name: Build static Qt from scratch
         run: |
@@ -87,16 +91,19 @@ jobs:
           test -f "$QT_STATIC_PREFIX/lib/libQt5Svg.a"
           test -f "$QT_STATIC_PREFIX/lib/libQt5X11Extras.a"
 
-      - name: Package static Qt for this workflow run
+      - name: Package static dependencies for this workflow run
         run: |
           set -euo pipefail
           tar -C "$QT_STATIC_PREFIX" -czf static-qt-5.15.17-arm64.tar.gz .
+          tar -C "$PYTHON_STATIC_PREFIX" -czf static-python-3.14.7-arm64.tar.gz .
 
-      - name: Upload static Qt workflow artifact
+      - name: Upload static dependency workflow artifact
         uses: actions/upload-artifact@v7
         with:
-          name: static-qt-5.15.17-arm64
-          path: static-qt-5.15.17-arm64.tar.gz
+          name: static-build-dependencies-arm64
+          path: |
+            static-qt-5.15.17-arm64.tar.gz
+            static-python-3.14.7-arm64.tar.gz
           if-no-files-found: error
           retention-days: 1
 
@@ -125,18 +132,22 @@ jobs:
       - name: Install Debug build dependencies
         run: bash automation/packaging/arm64/install_build_deps.sh
 
-      - name: Download static Qt from prepare job
+      - name: Download static dependencies from prepare job
         uses: actions/download-artifact@v8
         with:
-          name: static-qt-5.15.17-arm64
-          path: qt-artifact
+          name: static-build-dependencies-arm64
+          path: dependency-artifacts
 
-      - name: Restore static Qt for this job
+      - name: Restore static dependencies for this job
         run: |
           set -euo pipefail
           rm -rf "$QT_STATIC_PREFIX"
           mkdir -p "$QT_STATIC_PREFIX"
-          tar -C "$QT_STATIC_PREFIX" -xzf qt-artifact/static-qt-5.15.17-arm64.tar.gz
+          tar -C "$QT_STATIC_PREFIX" -xzf dependency-artifacts/static-qt-5.15.17-arm64.tar.gz
+          rm -rf "$PYTHON_STATIC_PREFIX"
+          mkdir -p "$PYTHON_STATIC_PREFIX"
+          tar -C "$PYTHON_STATIC_PREFIX" -xzf dependency-artifacts/static-python-3.14.7-arm64.tar.gz
+          "$PYTHON_STATIC_PREFIX/bin/python3.14" -c 'import ssl, ctypes, sqlite3, bz2, lzma, readline, curses, dbm.gnu, dbm.ndbm, uuid, compression.zstd, _sha2; print("Python stdlib imports passed")'
           "$QT_STATIC_PREFIX/bin/qmake" -v
 
       - name: Configure static Debug build
@@ -147,8 +158,10 @@ jobs:
             -DQRENDERDOC_NO_CXX11_REGEX=ON \
             -DQRENDERDOC_ENABLE_PYSIDE2=OFF \
             -DQT_QMAKE_EXECUTABLE="$QT_STATIC_PREFIX/bin/qmake" \
-            -DQMAKE_EXECUTABLE="$QT_STATIC_PREFIX/bin/qmake" \
             -DPython3_USE_STATIC_LIBS=TRUE \
+            -DPython3_EXECUTABLE="$PYTHON_STATIC_PREFIX/bin/python3.14" \
+            -DPython3_LIBRARY="$PYTHON_STATIC_PREFIX/lib/libpython3.14.a" \
+            -DPython3_INCLUDE_DIR="$PYTHON_STATIC_PREFIX/include/python3.14" \
             -DFORCE_PY_VERSION=3.14
 
       - name: Build static Debug
@@ -158,9 +171,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          pyver="$(python3.14 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-          stdlib="$(python3.14 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')"
-          destshared="$(python3.14 -c 'import sysconfig; print(sysconfig.get_config_var("DESTSHARED") or "")')"
+          pyver="$("$PYTHON_STATIC_PREFIX/bin/python3.14" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          stdlib="$("$PYTHON_STATIC_PREFIX/bin/python3.14" -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')"
+          destshared="$("$PYTHON_STATIC_PREFIX/bin/python3.14" -c 'import sysconfig; print(sysconfig.get_config_var("DESTSHARED") or "")')"
           pylib_root="build-debug/share/renderdoc/pylibs/lib/python${pyver}"
 
           mkdir -p "$pylib_root"
@@ -251,18 +264,22 @@ jobs:
       - name: Install Release build dependencies
         run: bash automation/packaging/arm64/install_build_deps.sh
 
-      - name: Download static Qt from prepare job
+      - name: Download static dependencies from prepare job
         uses: actions/download-artifact@v8
         with:
-          name: static-qt-5.15.17-arm64
-          path: qt-artifact
+          name: static-build-dependencies-arm64
+          path: dependency-artifacts
 
-      - name: Restore static Qt for this job
+      - name: Restore static dependencies for this job
         run: |
           set -euo pipefail
           rm -rf "$QT_STATIC_PREFIX"
           mkdir -p "$QT_STATIC_PREFIX"
-          tar -C "$QT_STATIC_PREFIX" -xzf qt-artifact/static-qt-5.15.17-arm64.tar.gz
+          tar -C "$QT_STATIC_PREFIX" -xzf dependency-artifacts/static-qt-5.15.17-arm64.tar.gz
+          rm -rf "$PYTHON_STATIC_PREFIX"
+          mkdir -p "$PYTHON_STATIC_PREFIX"
+          tar -C "$PYTHON_STATIC_PREFIX" -xzf dependency-artifacts/static-python-3.14.7-arm64.tar.gz
+          "$PYTHON_STATIC_PREFIX/bin/python3.14" -c 'import ssl, ctypes, sqlite3, bz2, lzma, readline, curses, dbm.gnu, dbm.ndbm, uuid, compression.zstd, _sha2; print("Python stdlib imports passed")'
           "$QT_STATIC_PREFIX/bin/qmake" -v
 
       - name: Configure static Release build
@@ -275,8 +292,10 @@ jobs:
             -DQRENDERDOC_NO_CXX11_REGEX=ON \
             -DQRENDERDOC_ENABLE_PYSIDE2=OFF \
             -DQT_QMAKE_EXECUTABLE="$QT_STATIC_PREFIX/bin/qmake" \
-            -DQMAKE_EXECUTABLE="$QT_STATIC_PREFIX/bin/qmake" \
             -DPython3_USE_STATIC_LIBS=TRUE \
+            -DPython3_EXECUTABLE="$PYTHON_STATIC_PREFIX/bin/python3.14" \
+            -DPython3_LIBRARY="$PYTHON_STATIC_PREFIX/lib/libpython3.14.a" \
+            -DPython3_INCLUDE_DIR="$PYTHON_STATIC_PREFIX/include/python3.14" \
             -DFORCE_PY_VERSION=3.14
 
       - name: Build static Release
@@ -289,9 +308,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          pyver="$(python3.14 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-          stdlib="$(python3.14 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')"
-          destshared="$(python3.14 -c 'import sysconfig; print(sysconfig.get_config_var("DESTSHARED") or "")')"
+          pyver="$("$PYTHON_STATIC_PREFIX/bin/python3.14" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          stdlib="$("$PYTHON_STATIC_PREFIX/bin/python3.14" -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')"
+          destshared="$("$PYTHON_STATIC_PREFIX/bin/python3.14" -c 'import sysconfig; print(sysconfig.get_config_var("DESTSHARED") or "")')"
           pylib_root="dist/share/renderdoc/pylibs/lib/python${pyver}"
 
           mkdir -p "$pylib_root"
@@ -308,6 +327,11 @@ jobs:
             "$pylib_root/idlelib" \
             "$pylib_root/ensurepip" \
             "$pylib_root/site-packages"
+
+      - name: Include bundled Python license
+        run: |
+          mkdir -p dist/share/doc/renderdoc
+          cp "$PYTHON_STATIC_PREFIX/share/licenses/python/LICENSE" dist/share/doc/renderdoc/PYTHON-LICENSE.txt
 
       - name: Add application icon to package
         run: |
@@ -452,7 +476,7 @@ jobs:
               "- Architecture: ARM64 / AArch64",
               "- Build OS: Ubuntu 26.04 ARM64",
               "- Qt: statically linked (Qt 5.15.17)",
-              "- Python runtime: statically linked; standard library bundled",
+              "- Python runtime: 3.14.7 built from official source, statically linked; matching standard library bundled",
               "- Validation: static Debug core/QRenderDoc unit tests and static Release runtime-link validation both passed",
               f"- Installation: download and run {bt}install.sh{bt}; user files are installed under {bt}~/.local{bt} and missing system runtime packages are installed with apt.",
               "",
@@ -498,3 +522,4 @@ jobs:
             echo "- Release validation: passed"
             echo "- Release URL: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
           } >> "$GITHUB_STEP_SUMMARY"
+
