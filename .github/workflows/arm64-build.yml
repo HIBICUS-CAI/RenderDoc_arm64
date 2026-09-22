@@ -128,58 +128,21 @@ jobs:
             libssl-dev \
             mesa-common-dev \
             libgl1-mesa-dev \
-            qtbase5-dev \
-            qt5-qmake \
-            qtchooser \
-            libqt5svg5-dev \
-            libqt5x11extras5-dev \
             python3.14-dev \
             bison \
             autoconf \
             automake \
             libtool
 
-      - name: Check system Qt for unit tests
+      - name: Check build toolchain
         run: |
-          qmake -v
-          qmake -query QT_VERSION
           gcc-14 --version
           g++-14 --version
           python3.14 --version
 
-      - name: Configure unit-test build
-        run: |
-          CC=gcc-14 CXX=g++-14 cmake -S source -B build-test \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DFORCE_PY_VERSION=3.14 \
-            -DQRENDERDOC_ENABLE_PYSIDE2=OFF
-
-      - name: Build unit-test binaries
-        run: |
-          cmake --build build-test --parallel "$(nproc)"
-
-      - name: Run core unit tests
-        run: |
-          set -o pipefail
-          build-test/bin/renderdoccmd test unit -o core-unit-tests.log
-          cat core-unit-tests.log
-
-      - name: Run QRenderDoc unit tests
-        run: |
-          set -o pipefail
-          build-test/bin/qrenderdoc --unittest log=qrenderdoc-unit-tests.log
-          cat qrenderdoc-unit-tests.log
-
-      - name: Cache static Qt
-        id: qt-cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.QT_STATIC_PREFIX }}
-          key: qt5-static-5.15.17-ubuntu-26.04-arm64-gcc14-${{ hashFiles('automation/packaging/arm64/build_static_qt.sh') }}
-
       - name: Build static Qt
-        if: steps.qt-cache.outputs.cache-hit != 'true'
         run: |
+          rm -rf "$QT_STATIC_PREFIX"
           automation/packaging/arm64/build_static_qt.sh "$QT_STATIC_PREFIX"
 
       - name: Verify static Qt
@@ -191,6 +154,74 @@ jobs:
           test -f "$QT_STATIC_PREFIX/lib/libQt5Network.a"
           test -f "$QT_STATIC_PREFIX/lib/libQt5Svg.a"
           test -f "$QT_STATIC_PREFIX/lib/libQt5X11Extras.a"
+
+      - name: Configure static Debug build for unit tests
+        run: |
+          CC=gcc-14 CXX=g++-14 cmake -S source -B build-test \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DSTATIC_QRENDERDOC=ON \
+            -DQRENDERDOC_NO_CXX11_REGEX=ON \
+            -DQRENDERDOC_ENABLE_PYSIDE2=OFF \
+            -DQT_QMAKE_EXECUTABLE="$QT_STATIC_PREFIX/bin/qmake" \
+            -DQMAKE_EXECUTABLE="$QT_STATIC_PREFIX/bin/qmake" \
+            -DPython3_USE_STATIC_LIBS=TRUE \
+            -DFORCE_PY_VERSION=3.14
+
+      - name: Build static Debug binaries
+        run: |
+          cmake --build build-test --parallel "$(nproc)"
+
+      - name: Prepare Python standard library for Debug tests
+        run: |
+          set -euo pipefail
+
+          pyver="$(python3.14 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          stdlib="$(python3.14 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')"
+          destshared="$(python3.14 -c 'import sysconfig; print(sysconfig.get_config_var("DESTSHARED") or "")')"
+          pylib_root="build-test/share/renderdoc/pylibs/lib/python${pyver}"
+
+          mkdir -p "$pylib_root"
+          cp -a "$stdlib/." "$pylib_root/"
+
+          if [[ -n "$destshared" && -d "$destshared" && "$destshared" != "$stdlib/lib-dynload" ]]; then
+            mkdir -p "$pylib_root/lib-dynload"
+            cp -a "$destshared/." "$pylib_root/lib-dynload/"
+          fi
+
+          find "$pylib_root" -type d -name __pycache__ -prune -exec rm -rf '{}' +
+          rm -rf \
+            "$pylib_root/test" \
+            "$pylib_root/idlelib" \
+            "$pylib_root/ensurepip" \
+            "$pylib_root/site-packages"
+
+      - name: Verify Debug build uses static Qt and Python
+        run: |
+          set -euo pipefail
+
+          ldd build-test/bin/qrenderdoc | tee qrenderdoc-debug-ldd.txt
+
+          if grep -E 'libQt5|libQt6' qrenderdoc-debug-ldd.txt; then
+            echo "ERROR: Debug qrenderdoc still dynamically links Qt." >&2
+            exit 1
+          fi
+
+          if grep -E 'libpython[0-9]' qrenderdoc-debug-ldd.txt; then
+            echo "ERROR: Debug qrenderdoc still dynamically links Python." >&2
+            exit 1
+          fi
+
+      - name: Run core unit tests
+        run: |
+          set -euo pipefail
+          build-test/bin/renderdoccmd test unit -o core-unit-tests.log
+          cat core-unit-tests.log
+
+      - name: Run QRenderDoc unit tests
+        run: |
+          set -euo pipefail
+          build-test/bin/qrenderdoc --unittest log=qrenderdoc-unit-tests.log
+          cat qrenderdoc-unit-tests.log
 
       - name: Configure static release build
         run: |
@@ -288,6 +319,7 @@ jobs:
           path: |
             renderdoc-linux-arm64.tar.gz
             qrenderdoc-ldd.txt
+            qrenderdoc-debug-ldd.txt
             renderdoccmd-ldd.txt
             librenderdoc-ldd.txt
             core-unit-tests.log
@@ -357,7 +389,7 @@ jobs:
               "- Build OS: Ubuntu 26.04 ARM64",
               "- Qt: statically linked (Qt 5.15.17)",
               "- Python runtime: statically linked; standard library bundled",
-              "- Validation: core and QRenderDoc unit tests run before the release build",
+              "- Validation: core and QRenderDoc unit tests run on a static Debug build before the static Release build",
               f"- Installation: download and run {bt}install.sh{bt} as a normal user; it installs required Ubuntu runtime packages with apt when missing.",
               "",
               marker,
