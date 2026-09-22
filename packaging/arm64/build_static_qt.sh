@@ -56,7 +56,30 @@ tar -xf "${workdir}/${QTX11_FILE}" -C "$workdir"
 rm -rf "$PREFIX"
 mkdir -p "$PREFIX"
 
-qtbase_src="${workdir}/qtbase-everywhere-opensource-src-${QT_VERSION}"
+find_extracted_source() {
+  local prefix="$1"
+  local dir
+
+  dir="$(find "$workdir" -mindepth 1 -maxdepth 1 -type d -name "${prefix}*${QT_VERSION}*" -print -quit)"
+
+  if [[ -z "$dir" || ! -d "$dir" ]]; then
+    echo "Could not find extracted Qt source directory for ${prefix} ${QT_VERSION}" >&2
+    echo "Extracted directories:" >&2
+    find "$workdir" -mindepth 1 -maxdepth 1 -type d -printf '  %f\n' >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$dir"
+}
+
+qtbase_src="$(find_extracted_source qtbase)"
+qtsvg_src="$(find_extracted_source qtsvg)"
+qtx11_src="$(find_extracted_source qtx11extras)"
+
+echo "QtBase source:      $qtbase_src"
+echo "QtSvg source:       $qtsvg_src"
+echo "QtX11Extras source: $qtx11_src"
+
 qtbase_build="${workdir}/qtbase-build"
 mkdir -p "$qtbase_build"
 
@@ -78,9 +101,9 @@ build_qt_module() {
   popd
 }
 
-build_qt_module   "${workdir}/qtsvg-everywhere-opensource-src-${QT_VERSION}"   "${workdir}/qtsvg-build"
+build_qt_module "$qtsvg_src" "${workdir}/qtsvg-build"
 
-build_qt_module   "${workdir}/qtx11extras-everywhere-opensource-src-${QT_VERSION}"   "${workdir}/qtx11extras-build"
+build_qt_module "$qtx11_src" "${workdir}/qtx11extras-build"
 
 test -f "${PREFIX}/lib/libQt5Core.a"
 test -f "${PREFIX}/lib/libQt5Gui.a"
