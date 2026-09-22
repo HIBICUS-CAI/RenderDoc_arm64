@@ -5,13 +5,6 @@ REPO="HIBICUS-CAI/renderdoc-arm64-build"
 RELEASE_TAG="${RENDERDOC_ARM64_RELEASE_TAG:-__RELEASE_TAG__}"
 PACKAGE_NAME="renderdoc-linux-arm64.tar.gz"
 
-if [[ "$RELEASE_TAG" == "__RELEASE_TAG__" ]]; then
-  latest_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest")"
-  RELEASE_TAG="${latest_url##*/}"
-fi
-
-PACKAGE_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${PACKAGE_NAME}"
-
 APP_ROOT="${HOME}/.local/opt/renderdoc-arm64"
 BIN_DIR="${HOME}/.local/bin"
 DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}"
@@ -30,12 +23,80 @@ case "$(uname -m)" in
     ;;
 esac
 
+if ! command -v apt-get >/dev/null 2>&1 || ! command -v dpkg-query >/dev/null 2>&1; then
+  echo "Error: this installer currently supports Ubuntu/Debian systems using apt." >&2
+  exit 1
+fi
+
+runtime_packages=(
+  ca-certificates
+  curl
+  tar
+  libstdc++6
+  libgcc-s1
+  libx11-6
+  libx11-xcb1
+  libxcb1
+  libxcb-util1
+  libxcb-icccm4
+  libxcb-image0
+  libxcb-keysyms1
+  libxcb-randr0
+  libxcb-render0
+  libxcb-render-util0
+  libxcb-shape0
+  libxcb-shm0
+  libxcb-sync1
+  libxcb-xfixes0
+  libxcb-xinerama0
+  libxcb-xinput0
+  libxcb-xkb1
+  libxkbcommon0
+  libxkbcommon-x11-0
+  libfontconfig1
+  libfreetype6
+  libgl1
+  libvulkan1
+  libssl3t64
+  desktop-file-utils
+  shared-mime-info
+  gtk-update-icon-cache
+  hicolor-icon-theme
+)
+
+missing_packages=()
+for pkg in "${runtime_packages[@]}"; do
+  if ! dpkg-query -W -f='${db:Status-Abbrev}' "$pkg" 2>/dev/null | grep -q '^ii '; then
+    missing_packages+=("$pkg")
+  fi
+done
+
+if (( ${#missing_packages[@]} > 0 )); then
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "Error: sudo is required to install missing runtime packages:" >&2
+    printf '  %s\n' "${missing_packages[@]}" >&2
+    exit 1
+  fi
+
+  echo "Installing required system runtime packages:"
+  printf '  %s\n' "${missing_packages[@]}"
+  sudo apt-get update
+  sudo apt-get install -y --no-install-recommends "${missing_packages[@]}"
+fi
+
 for cmd in curl tar; do
   command -v "$cmd" >/dev/null 2>&1 || {
-    echo "Error: required command not found: $cmd" >&2
+    echo "Error: required command not found after dependency installation: $cmd" >&2
     exit 1
   }
 done
+
+if [[ "$RELEASE_TAG" == "__RELEASE_TAG__" ]]; then
+  latest_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest")"
+  RELEASE_TAG="${latest_url##*/}"
+fi
+
+PACKAGE_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${PACKAGE_NAME}"
 
 if pgrep -f "${APP_ROOT}/bin/qrenderdoc" >/dev/null 2>&1; then
   echo "Error: RenderDoc is currently running from ${APP_ROOT}." >&2
@@ -105,7 +166,7 @@ if [[ -f "${APP_ROOT}/share/mime/packages/renderdoc-capture.xml" ]]; then
   install -m 0644 "${APP_ROOT}/share/mime/packages/renderdoc-capture.xml" "$MIME_FILE"
 fi
 
-QT_QPA_PLATFORM=offscreen "${APP_ROOT}/bin/qrenderdoc" --install_vulkan_layer user
+"${APP_ROOT}/bin/renderdoccmd" vulkanlayer --register --user
 
 mkdir -p "$STATE_DIR"
 cat > "$MANIFEST" <<EOF
@@ -127,3 +188,4 @@ echo "RenderDoc ARM64 ${RELEASE_TAG} installed."
 echo "Application: ${APP_ROOT}/bin/qrenderdoc"
 echo "Launcher:    GNOME application menu -> RenderDoc ARM64"
 echo "Manifest:    ${MANIFEST}"
+echo "System runtime packages are managed by apt and are not removed by uninstall.sh."

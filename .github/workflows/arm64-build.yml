@@ -14,12 +14,13 @@ permissions:
 
 jobs:
   build-arm64:
-    name: Build upstream tag for Ubuntu ARM64
+    name: Test and build upstream tag for Ubuntu ARM64
     runs-on: ubuntu-26.04-arm
     env:
       QT_SELECT: qt5
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
+      QT_STATIC_PREFIX: ${{ github.workspace }}/.qt-static/5.15.17
 
     steps:
       - name: Checkout ARM64 automation
@@ -89,16 +90,42 @@ jobs:
           gcc --version
           cmake --version
 
-      - name: Install build dependencies
+      - name: Install build and test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install -y --no-install-recommends \
             build-essential \
+            gcc-14 \
+            g++-14 \
             cmake \
             pkg-config \
+            curl \
+            xz-utils \
             libx11-dev \
             libx11-xcb-dev \
+            libxext-dev \
+            libxi-dev \
+            libxrender-dev \
+            libxcb1-dev \
+            libxcb-util-dev \
             libxcb-keysyms1-dev \
+            libxcb-image0-dev \
+            libxcb-shm0-dev \
+            libxcb-icccm4-dev \
+            libxcb-sync-dev \
+            libxcb-xfixes0-dev \
+            libxcb-shape0-dev \
+            libxcb-randr0-dev \
+            libxcb-render0-dev \
+            libxcb-render-util0-dev \
+            libxcb-xinerama0-dev \
+            libxcb-xinput-dev \
+            libxcb-xkb-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libfontconfig1-dev \
+            libfreetype-dev \
+            libssl-dev \
             mesa-common-dev \
             libgl1-mesa-dev \
             qtbase5-dev \
@@ -106,41 +133,136 @@ jobs:
             qtchooser \
             libqt5svg5-dev \
             libqt5x11extras5-dev \
-            python3-dev \
+            python3.14-dev \
             bison \
             autoconf \
             automake \
             libtool
 
-      - name: Check Qt
+      - name: Check system Qt for unit tests
         run: |
           qmake -v
           qmake -query QT_VERSION
+          gcc-14 --version
+          g++-14 --version
+          python3.14 --version
 
-      - name: Configure
+      - name: Configure unit-test build
         run: |
-          cmake -S source -B build \
+          CC=gcc-14 CXX=g++-14 cmake -S source -B build-test \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DFORCE_PY_VERSION=3.14 \
+            -DQRENDERDOC_ENABLE_PYSIDE2=OFF
+
+      - name: Build unit-test binaries
+        run: |
+          cmake --build build-test --parallel "$(nproc)"
+
+      - name: Run core unit tests
+        run: |
+          set -o pipefail
+          build-test/bin/renderdoccmd test unit -o core-unit-tests.log
+          cat core-unit-tests.log
+
+      - name: Run QRenderDoc unit tests
+        run: |
+          set -o pipefail
+          build-test/bin/qrenderdoc --unittest log=qrenderdoc-unit-tests.log
+          cat qrenderdoc-unit-tests.log
+
+      - name: Cache static Qt
+        id: qt-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.QT_STATIC_PREFIX }}
+          key: qt5-static-5.15.17-ubuntu-26.04-arm64-gcc14-${{ hashFiles('automation/packaging/arm64/build_static_qt.sh') }}
+
+      - name: Build static Qt
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        run: |
+          automation/packaging/arm64/build_static_qt.sh "$QT_STATIC_PREFIX"
+
+      - name: Verify static Qt
+        run: |
+          "$QT_STATIC_PREFIX/bin/qmake" -v
+          test -f "$QT_STATIC_PREFIX/lib/libQt5Core.a"
+          test -f "$QT_STATIC_PREFIX/lib/libQt5Gui.a"
+          test -f "$QT_STATIC_PREFIX/lib/libQt5Widgets.a"
+          test -f "$QT_STATIC_PREFIX/lib/libQt5Network.a"
+          test -f "$QT_STATIC_PREFIX/lib/libQt5Svg.a"
+          test -f "$QT_STATIC_PREFIX/lib/libQt5X11Extras.a"
+
+      - name: Configure static release build
+        run: |
+          CC=gcc-14 CXX=g++-14 cmake -S source -B build-release \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/dist" \
-            -DVULKAN_LAYER_FOLDER="${{ github.workspace }}/dist/share/vulkan/implicit_layer.d"
+            -DVULKAN_LAYER_FOLDER="${{ github.workspace }}/dist/share/vulkan/implicit_layer.d" \
+            -DSTATIC_QRENDERDOC=ON \
+            -DQRENDERDOC_NO_CXX11_REGEX=ON \
+            -DQRENDERDOC_ENABLE_PYSIDE2=OFF \
+            -DQT_QMAKE_EXECUTABLE="$QT_STATIC_PREFIX/bin/qmake" \
+            -DQMAKE_EXECUTABLE="$QT_STATIC_PREFIX/bin/qmake" \
+            -DPython3_USE_STATIC_LIBS=TRUE \
+            -DFORCE_PY_VERSION=3.14
 
-      - name: Build
-        run: cmake --build build --parallel "$(nproc)"
+      - name: Build static release
+        run: cmake --build build-release --parallel "$(nproc)"
 
-      - name: Install
-        run: cmake --install build
+      - name: Install static release
+        run: cmake --install build-release
+
+      - name: Bundle Python standard library
+        run: |
+          set -euo pipefail
+
+          pyver="$(python3.14 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+          stdlib="$(python3.14 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))')"
+          destshared="$(python3.14 -c 'import sysconfig; print(sysconfig.get_config_var("DESTSHARED") or "")')"
+          pylib_root="dist/share/renderdoc/pylibs/lib/python${pyver}"
+
+          mkdir -p "$pylib_root"
+          cp -a "$stdlib/." "$pylib_root/"
+
+          if [[ -n "$destshared" && -d "$destshared" && "$destshared" != "$stdlib/lib-dynload" ]]; then
+            mkdir -p "$pylib_root/lib-dynload"
+            cp -a "$destshared/." "$pylib_root/lib-dynload/"
+          fi
+
+          find "$pylib_root" -type d -name __pycache__ -prune -exec rm -rf '{}' +
+          rm -rf \
+            "$pylib_root/test" \
+            "$pylib_root/idlelib" \
+            "$pylib_root/ensurepip" \
+            "$pylib_root/site-packages"
 
       - name: Add application icon to package
         run: |
           mkdir -p dist/share/renderdoc
           cp source/qrenderdoc/Resources/logo.svg dist/share/renderdoc/renderdoc-logo.svg
 
-      - name: Verify binaries
+      - name: Verify release binaries and runtime links
         run: |
-          file build/bin/qrenderdoc
-          file build/bin/renderdoccmd
-          file build/lib/librenderdoc.so
-          build/bin/renderdoccmd --version || true
+          set -euo pipefail
+
+          file build-release/bin/qrenderdoc
+          file build-release/bin/renderdoccmd
+          file build-release/lib/librenderdoc.so
+          build-release/bin/renderdoccmd --version
+
+          ldd build-release/bin/qrenderdoc | tee qrenderdoc-ldd.txt
+          ldd build-release/bin/renderdoccmd | tee renderdoccmd-ldd.txt
+          ldd build-release/lib/librenderdoc.so | tee librenderdoc-ldd.txt
+
+          if grep -E 'libQt5|libQt6' qrenderdoc-ldd.txt; then
+            echo "ERROR: qrenderdoc still dynamically links Qt." >&2
+            exit 1
+          fi
+
+          if grep -E 'libpython[0-9]' qrenderdoc-ldd.txt; then
+            echo "ERROR: qrenderdoc still dynamically links Python." >&2
+            exit 1
+          fi
 
       - name: Archive build
         run: tar -C dist -czf renderdoc-linux-arm64.tar.gz .
@@ -163,7 +285,13 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: renderdoc-${{ steps.version.outputs.release_tag }}
-          path: renderdoc-linux-arm64.tar.gz
+          path: |
+            renderdoc-linux-arm64.tar.gz
+            qrenderdoc-ldd.txt
+            renderdoccmd-ldd.txt
+            librenderdoc-ldd.txt
+            core-unit-tests.log
+            qrenderdoc-unit-tests.log
           if-no-files-found: error
 
       - name: Create or update versioned release
@@ -200,8 +328,6 @@ jobs:
           bt = chr(96)
 
           previous = Path("previous-release-notes.md").read_text(encoding="utf-8")
-
-          # Repair notes generated by older workflow revisions.
           previous = previous.replace("\\n", "\n")
           previous = previous.replace("\\" + bt, bt)
 
@@ -229,7 +355,10 @@ jobs:
               f"- Upstream commit: {bt}{upstream_sha}{bt}",
               "- Architecture: ARM64 / AArch64",
               "- Build OS: Ubuntu 26.04 ARM64",
-              f"- Installation: download and run {bt}install.sh{bt} as a normal user.",
+              "- Qt: statically linked (Qt 5.15.17)",
+              "- Python runtime: statically linked; standard library bundled",
+              "- Validation: core and QRenderDoc unit tests run before the release build",
+              f"- Installation: download and run {bt}install.sh{bt} as a normal user; it installs required Ubuntu runtime packages with apt when missing.",
               "",
               marker,
               *history,
@@ -269,5 +398,7 @@ jobs:
             echo "- Upstream: $UPSTREAM_TAG"
             echo "- Release: $RELEASE_TAG"
             echo "- Upstream commit: $UPSTREAM_SHA"
+            echo "- Qt: static 5.15.17"
+            echo "- Unit tests: passed before packaging"
             echo "- Release URL: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
           } >> "$GITHUB_STEP_SUMMARY"
