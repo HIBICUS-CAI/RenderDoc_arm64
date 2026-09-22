@@ -201,18 +201,17 @@ jobs:
           else
             echo "Creating new release $RELEASE_TAG"
 
-            cat > release-notes.md <<EOF
-Personal ARM64 Linux build of upstream RenderDoc **${UPSTREAM_TAG}**.
-
-- Upstream release: ${upstream_url}
-- Upstream commit: \`${UPSTREAM_SHA}\`
-- Architecture: ARM64 / AArch64
-- Build OS: Ubuntu 26.04 ARM64
-- Installation: download and run \`install.sh\` as a normal user.
-
-## Rebuild history
-${history_entry}
-EOF
+            {
+              printf '%s\\n' "Personal ARM64 Linux build of upstream RenderDoc **${UPSTREAM_TAG}**."
+              printf '\\n'
+              printf '%s\\n' "- Upstream release: ${upstream_url}"
+              printf '%s\\n' "- Upstream commit: \\\`${UPSTREAM_SHA}\\\`"
+              printf '%s\\n' "- Architecture: ARM64 / AArch64"
+              printf '%s\\n' "- Build OS: Ubuntu 26.04 ARM64"
+              printf '%s\\n' "- Installation: download and run \\\`install.sh\\\` as a normal user."
+              printf '\\n## Rebuild history\\n'
+              printf '%s\\n' "${history_entry}"
+            } > release-notes.md
 
             gh release create "$RELEASE_TAG" \
               renderdoc-linux-arm64.tar.gz \
