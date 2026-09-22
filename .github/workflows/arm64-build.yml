@@ -19,6 +19,7 @@ jobs:
     env:
       QT_SELECT: qt5
       GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
 
     steps:
       - name: Checkout ARM64 automation

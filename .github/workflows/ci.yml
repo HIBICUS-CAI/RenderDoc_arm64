@@ -3,7 +3,6 @@ name: CI
 on:
   push:
     branches:
-      - v1.x
       - ci-test
   pull_request:
     branches:
