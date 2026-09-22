@@ -1,0 +1,233 @@
+name: Build ARM64 Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Upstream baldurk/renderdoc tag (e.g. v1.46). Leave empty or use 'latest' for the latest stable release."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-arm64:
+    name: Build upstream tag for Ubuntu ARM64
+    runs-on: ubuntu-26.04-arm
+    env:
+      QT_SELECT: qt5
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout ARM64 automation
+        uses: actions/checkout@v6
+        with:
+          path: automation
+
+      - name: Resolve upstream version
+        id: version
+        env:
+          REQUESTED_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+
+          requested="${REQUESTED_TAG}"
+          if [[ -z "$requested" || "$requested" == "latest" ]]; then
+            tag="$(gh api repos/baldurk/renderdoc/releases/latest --jq '.tag_name')"
+          else
+            tag="$requested"
+
+            if ! gh api "repos/baldurk/renderdoc/git/ref/tags/$tag" >/dev/null 2>&1; then
+              if [[ "$tag" != v* ]] && gh api "repos/baldurk/renderdoc/git/ref/tags/v$tag" >/dev/null 2>&1; then
+                tag="v$tag"
+              else
+                echo "Upstream tag '$requested' does not exist." >&2
+                exit 1
+              fi
+            fi
+          fi
+
+          if [[ ! "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "Unsupported upstream tag format: $tag" >&2
+            exit 1
+          fi
+
+          release_tag="${tag}_arm64"
+
+          echo "upstream_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+          echo "Upstream tag: $tag"
+          echo "ARM64 release tag: $release_tag"
+
+      - name: Checkout upstream RenderDoc
+        uses: actions/checkout@v6
+        with:
+          repository: baldurk/renderdoc
+          ref: ${{ steps.version.outputs.upstream_tag }}
+          path: source
+          fetch-depth: 1
+
+      - name: Patch personal ARM64 branding
+        run: python3 automation/packaging/arm64/patch_source.py source
+
+      - name: Show source revision
+        id: source
+        run: |
+          set -euo pipefail
+          sha="$(git -C source rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Building upstream ${{ steps.version.outputs.upstream_tag }} at $sha"
+
+      - name: Show environment
+        run: |
+          uname -a
+          dpkg --print-architecture
+          gcc --version
+          cmake --version
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb-keysyms1-dev \
+            mesa-common-dev \
+            libgl1-mesa-dev \
+            qtbase5-dev \
+            qt5-qmake \
+            qtchooser \
+            libqt5svg5-dev \
+            libqt5x11extras5-dev \
+            python3-dev \
+            bison \
+            autoconf \
+            automake \
+            libtool
+
+      - name: Check Qt
+        run: |
+          qmake -v
+          qmake -query QT_VERSION
+
+      - name: Configure
+        run: |
+          cmake -S source -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/dist" \
+            -DVULKAN_LAYER_FOLDER="${{ github.workspace }}/dist/share/vulkan/implicit_layer.d"
+
+      - name: Build
+        run: cmake --build build --parallel "$(nproc)"
+
+      - name: Install
+        run: cmake --install build
+
+      - name: Add application icon to package
+        run: |
+          mkdir -p dist/share/renderdoc
+          cp source/qrenderdoc/Resources/logo.svg dist/share/renderdoc/renderdoc-logo.svg
+
+      - name: Verify binaries
+        run: |
+          file build/bin/qrenderdoc
+          file build/bin/renderdoccmd
+          file build/lib/librenderdoc.so
+          build/bin/renderdoccmd --version || true
+
+      - name: Archive build
+        run: tar -C dist -czf renderdoc-linux-arm64.tar.gz .
+
+      - name: Prepare standalone installer scripts
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          cp automation/packaging/arm64/install.sh install.sh
+          cp automation/packaging/arm64/uninstall.sh uninstall.sh
+          sed -i "s/__RELEASE_TAG__/$RELEASE_TAG/g" install.sh
+          chmod +x install.sh uninstall.sh
+
+          if grep -q '__RELEASE_TAG__' install.sh; then
+            echo "Installer release tag substitution failed." >&2
+            exit 1
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: renderdoc-${{ steps.version.outputs.release_tag }}
+          path: renderdoc-linux-arm64.tar.gz
+          if-no-files-found: error
+
+      - name: Create or update versioned release
+        env:
+          UPSTREAM_TAG: ${{ steps.version.outputs.upstream_tag }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          UPSTREAM_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          timestamp="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          upstream_url="https://github.com/baldurk/renderdoc/releases/tag/${UPSTREAM_TAG}"
+          title="RenderDoc ${UPSTREAM_TAG} Personal ARM64 Build"
+          history_entry="- ${timestamp}: rebuilt from upstream \`${UPSTREAM_TAG}\` (\`${UPSTREAM_SHA}\`) in [workflow run ${GITHUB_RUN_ID}](${run_url})."
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Updating existing release $RELEASE_TAG"
+
+            gh release view "$RELEASE_TAG" --json body --jq '.body // ""' > release-notes.md
+
+            if ! grep -q '^## Rebuild history$' release-notes.md; then
+              printf '\n## Rebuild history\n' >> release-notes.md
+            fi
+            printf '%s\n' "$history_entry" >> release-notes.md
+
+            gh release upload "$RELEASE_TAG" \
+              renderdoc-linux-arm64.tar.gz \
+              install.sh \
+              uninstall.sh \
+              --clobber
+
+            gh release edit "$RELEASE_TAG" \
+              --title "$title" \
+              --notes-file release-notes.md
+          else
+            echo "Creating new release $RELEASE_TAG"
+
+            cat > release-notes.md <<EOF
+Personal ARM64 Linux build of upstream RenderDoc **${UPSTREAM_TAG}**.
+
+- Upstream release: ${upstream_url}
+- Upstream commit: \`${UPSTREAM_SHA}\`
+- Architecture: ARM64 / AArch64
+- Build OS: Ubuntu 26.04 ARM64
+- Installation: download and run \`install.sh\` as a normal user.
+
+## Rebuild history
+${history_entry}
+EOF
+
+            gh release create "$RELEASE_TAG" \
+              renderdoc-linux-arm64.tar.gz \
+              install.sh \
+              uninstall.sh \
+              --target "${GITHUB_SHA}" \
+              --title "$title" \
+              --notes-file release-notes.md
+          fi
+
+          {
+            echo "## ARM64 release"
+            echo
+            echo "- Upstream: \`$UPSTREAM_TAG\`"
+            echo "- Release: \`$RELEASE_TAG\`"
+            echo "- Upstream commit: \`$UPSTREAM_SHA\`"
+            echo "- Release URL: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
+          } >> "$GITHUB_STEP_SUMMARY"
