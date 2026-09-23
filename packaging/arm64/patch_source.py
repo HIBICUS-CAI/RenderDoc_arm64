@@ -46,7 +46,7 @@ endif()'''
 replacement = r'''if(STATIC_QRENDERDOC)
     # Match CPython's own executable link dependencies, including built-ins.
     execute_process(
-        COMMAND "${PYTHON_EXECUTABLE}" -c
+        COMMAND "${PYTHON_EXECUTABLE}" -I -c
             "import shlex, sysconfig; flags = ' '.join(sysconfig.get_config_var(k) or '' for k in ('LIBS', 'MODLIBS', 'LIBM', 'LIBC')); print(shlex.join(f for f in shlex.split(flags) if f.strip()))"
         RESULT_VARIABLE PYTHON_STATIC_FLAGS_RESULT
         OUTPUT_VARIABLE PYTHON_STATIC_FLAGS
@@ -58,15 +58,42 @@ replacement = r'''if(STATIC_QRENDERDOC)
     message(STATUS "Static Python dependencies: ${PYTHON_STATIC_FLAGS}")
     separate_arguments(PYTHON_STATIC_LIBS UNIX_COMMAND "${PYTHON_STATIC_FLAGS}")
 
+    # Py_Initialize() alone can discover the runner's python3 via PATH and
+    # load its incompatible stdlib. Match qrenderdoc's explicit Python home.
+    execute_process(
+        COMMAND "${PYTHON_EXECUTABLE}" -I -c "import sys; print(sys.base_prefix)"
+        RESULT_VARIABLE PYTHON_STATIC_HOME_RESULT
+        OUTPUT_VARIABLE PYTHON_STATIC_HOME
+        ERROR_VARIABLE PYTHON_STATIC_HOME_ERROR
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT PYTHON_STATIC_HOME_RESULT EQUAL 0 OR NOT IS_DIRECTORY "${PYTHON_STATIC_HOME}")
+        message(FATAL_ERROR "Could not query static Python home: ${PYTHON_STATIC_HOME_ERROR}")
+    endif()
+
     # Fail at configure time instead of at the end of the RenderDoc build.
-    # Use the same whole-archive linking as qrenderdoc, then exercise the
-    # built-in XML/compression modules that require expat and zlib.
+    # Use the same whole-archive linking as qrenderdoc, then exercise its
+    # matching XML/compression/hash extension modules.
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/check_static_python.c" [=[
 #include <Python.h>
-int main(void)
+int main(int argc, char **argv)
 {
-    Py_Initialize();
+    if(argc != 3)
+        return 2;
+    PyConfig config;
+    PyConfig_InitIsolatedConfig(&config);
+    config.site_import = 0;
+    PyStatus status = PyConfig_SetBytesString(&config, &config.home, argv[1]);
+    if(!PyStatus_Exception(status))
+        status = PyConfig_SetBytesString(&config, &config.program_name, argv[2]);
+    if(!PyStatus_Exception(status))
+        status = Py_InitializeFromConfig(&config);
+    PyConfig_Clear(&config);
+    if(PyStatus_Exception(status))
+        Py_ExitStatusException(status);
+
     int result = PyRun_SimpleString(
+        "import sys\n"
+        "print('Static Python home:', sys.prefix, flush=True)\n"
         "import pyexpat, zlib, _md5, _sha1, _sha2, _sha3, _blake2, _hmac\n"
         "pyexpat.ParserCreate().Parse('<root/>', True)\n"
         "assert _sha2.sha256(b'abc').hexdigest() == 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'\n"
@@ -83,13 +110,14 @@ int main(void)
             -rdynamic -Wl,--whole-archive ${PYTHON_LIBRARY}
             -Wl,--no-whole-archive ${PYTHON_STATIC_LIBS}
         COMPILE_OUTPUT_VARIABLE PYTHON_STATIC_COMPILE_OUTPUT
-        RUN_OUTPUT_VARIABLE PYTHON_STATIC_RUN_OUTPUT)
+        RUN_OUTPUT_VARIABLE PYTHON_STATIC_RUN_OUTPUT
+        ARGS "${PYTHON_STATIC_HOME}" "${PYTHON_EXECUTABLE}")
     if(NOT PYTHON_STATIC_COMPILE_RESULT OR NOT "${PYTHON_STATIC_RUN_RESULT}" STREQUAL "0")
         message(FATAL_ERROR
             "Static Python embedding check failed.\n"
             "${PYTHON_STATIC_COMPILE_OUTPUT}\n${PYTHON_STATIC_RUN_OUTPUT}")
     endif()
-    message(STATUS "Static Python embedding check passed (pyexpat and zlib)")
+    message(STATUS "Static Python embedding check passed (pyexpat, zlib and hashes; home: ${PYTHON_STATIC_HOME})")
 
     # qmake expects space-separated libraries, not a CMake semicolon list.
     string(REPLACE ";" " " PYTHON_LINK "${PYTHON_LIBRARY}")
