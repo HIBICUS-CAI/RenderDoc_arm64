@@ -1,9 +1,6 @@
 name: Lock old issues and PRs
 
 on:
-  schedule:
-    - cron: "45 6 * * *"
-  workflow_dispatch:
 
 jobs:
   inactivity-lock:
