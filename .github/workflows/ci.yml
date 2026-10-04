@@ -1,12 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - ci-test
-  pull_request:
-    branches:
-      - v1.x
 
 defaults:
   run:
